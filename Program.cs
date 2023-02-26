@@ -1,21 +1,20 @@
-﻿// See https://aka.ms/new-console-template for more information
-
-using PowerProviderDataHandler.Utils;
+﻿using PowerProviderDataHandler.Utils;
+using SQLite;
 using System.Data;
-using System.Data.SqlClient;
 
 string EIC_CONSUMER = Helpers.GetVariable(nameof(EIC_CONSUMER));
 string EIC_PRODUCER = Helpers.GetVariable(nameof(EIC_PRODUCER));
 
+List<Unit> unitList = new ();
 
-List<CsvInfo> csvInfoList = new List<CsvInfo>();
+SQLiteConnection Database = new(Helpers.GetVariable("DB_SQLITE_PATH"), SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create);
+Database.CreateTable<Unit>();
 
-
-string[] files = Directory.GetFiles(Helpers.GetVariable("PATH"));
+string[] files = Directory.GetFiles(Helpers.GetVariable("PATH_TO_EXPORTS"));
 
 foreach (string file in files)
 {
-    string EIC = null;
+    string? EIC = null;
     int i = 14;
     using (var reader = new StreamReader(file))
     {
@@ -34,90 +33,50 @@ foreach (string file in files)
             }
             var values = line.Split(';');
 
-            
-            
-            csvInfoList.Add(new CsvInfo()
+            unitList.Add(new ()
             {
-                TimeStamp = DateTime.ParseExact(values[0], "dd.MM.yyyy HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
+                TimeStamp = (int)DateTime.ParseExact(values[0], "dd.MM.yyyy HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture).Subtract(new DateTime(1970, 1, 1)).TotalSeconds,
                 Value = double.Parse(values[1].Replace("\"","")),
-                Status = values[2],
-                Type = EIC == EIC_PRODUCER ? 2 : 1
+                Status = values.Length > 2  ? values[2] : "",
+                Type = EIC == EIC_PRODUCER ? Type.PRODUCED_TO_GRID : Type.CONSUMED_FROM_GRID
             });
         }
     }
 }
 
-
-foreach (var csvInfo in csvInfoList)
+foreach (var unit in unitList)
 {
     //Console.WriteLine(csvInfo.TimeStamp.ToString() + " --- " + csvInfo.Type);
 }
 
-//DB connection
-
-
-//insert to DB
-
-using (SqlConnection openCon = new SqlConnection(Helpers.GetVariable("DB_CONNECTION_STRING")))
+foreach (var unit in unitList)
 {
-    openCon.Open();
-
-    SqlDataReader sqlDataReader;
-    SqlCommand sqlCommand;
-
-    foreach (var csvInfo in csvInfoList)
+    Unit unitFound = Database.Table<Unit>().FirstOrDefault(u => u.TimeStamp == unit.TimeStamp && u.Type == u.Type);
+    if (unitFound != null)
     {
-        sqlCommand = new SqlCommand($"select TIMESTAMP, VALUE, TYPE from ELEKTRINA where TIMESTAMP = '{csvInfo.TimeStamp.ToString("yyyy-MM-dd HH:mm:ss")}' and TYPE = {csvInfo.Type}", openCon);
-        sqlDataReader = sqlCommand.ExecuteReader();
-        csvInfo.Exists = sqlDataReader.HasRows;
-        sqlDataReader.Close();
-        sqlCommand.Dispose();
+        unitFound.Exists = true;
     }
-
-    using (SqlTransaction oTransaction = openCon.BeginTransaction())
-    {
-        using (SqlCommand oCommand = openCon.CreateCommand())
-        {
-            oCommand.Transaction = oTransaction;
-            oCommand.CommandType = CommandType.Text;
-            oCommand.CommandText = "INSERT INTO ELEKTRINA (TIMESTAMP, VALUE, TYPE) VALUES (@t1, @v1, @t2);";
-            oCommand.Parameters.Add(new SqlParameter("@t1", SqlDbType.DateTime));
-            oCommand.Parameters.Add(new SqlParameter("@v1", SqlDbType.Float));
-            oCommand.Parameters.Add(new SqlParameter("@t2", SqlDbType.Int));
-            try
-            {
-                foreach (var csvInfo in csvInfoList.Where(c => !c.Exists))
-                {
-                    //Console.WriteLine(csvInfo.TimeStamp.ToString() + " --- " + csvInfo.Type);
-                    oCommand.Parameters[0].Value = csvInfo.TimeStamp;
-                    oCommand.Parameters[1].Value = csvInfo.Value;
-                    oCommand.Parameters[2].Value = csvInfo.Type;
-                    if (oCommand.ExecuteNonQuery() != 1)
-                    {
-                        //'handled as needed, 
-                        //' but this snippet will throw an exception to force a rollback
-                        throw new InvalidProgramException();
-                    }
-                }
-                oTransaction.Commit();
-
-            }
-            catch (Exception)
-            {
-                oTransaction.Rollback();
-                throw;
-            }
-        }
-    }
-
-    openCon.Close();
 }
 
-public class CsvInfo
+Database.InsertAll(unitList.Where(c => !c.Exists));
+
+Database.Commit();
+Database.Close();
+
+public class Unit
 {
-    public DateTime TimeStamp { get; set; }
+    public int TimeStamp { get; set; }
     public double Value { get; set; }
-    public string Status { get; set; }
-    public int Type { get; set; }
+    public string? Status { get; set; }
+    //1 - CONSUMER, 2 - PRODUCER
+    public Type Type { get; set; }
     public bool Exists { get; set; }
+}
+
+public enum Type
+{
+    CONSUMED_FROM_GRID = 1,
+    PRODUCED_TO_GRID = 2,
+    CONSUMED_FROM_SOLAR = 3,
+    PRODUCED_FROM_SOLAR = 4
 }
